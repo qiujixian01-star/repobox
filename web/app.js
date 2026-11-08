@@ -287,23 +287,33 @@ function renderLibrary() {
 }
 
 // Coupled with publish.py: a processed capture moves to inbox/done/ or inbox/failed/ under the same name.
+// A failed capture whose inbox/failed/ record was deleted from the library repo is dropped from local history.
 async function refreshStates() {
   const cfg = loadCfg();
   if (!cfg || !cfg.token) return;
-  const pending = historyFor(cfg).filter((x) => x.state === 'pending');
-  if (!pending.length) return;
+  const mine = historyFor(cfg);
+  const pending = mine.filter((x) => x.state === 'pending');
+  const failed = mine.filter((x) => x.state === 'failed');
+  if (!pending.length && !failed.length) return;
   const api = `https://api.github.com/repos/${cfg.repo}/contents`;
-  const exists = async (path) => {
-    try { return (await fetch(`${api}/${path}`, { method: 'GET', headers: ghHeaders(cfg) })).ok; } catch { return false; }
+  // 'yes' | 'no' (404) | 'unknown' (network error or any other status: never act on it)
+  const probe = async (path) => {
+    try {
+      const r = await fetch(`${api}/${path}`, { method: 'GET', headers: ghHeaders(cfg) });
+      return r.ok ? 'yes' : r.status === 404 ? 'no' : 'unknown';
+    } catch { return 'unknown'; }
   };
   const updates = new Map();
   for (const item of pending) {
-    if (await exists(`inbox/done/${item.id}.json`)) updates.set(item.id, 'done');
-    else if (await exists(`inbox/failed/${item.id}.json`)) updates.set(item.id, 'failed');
+    if (await probe(`inbox/done/${item.id}.json`) === 'yes') updates.set(item.id, 'done');
+    else if (await probe(`inbox/failed/${item.id}.json`) === 'yes') updates.set(item.id, 'failed');
+  }
+  for (const item of failed) {
+    if (await probe(`inbox/failed/${item.id}.json`) === 'no') updates.set(item.id, null);
   }
   if (!updates.size) return;
   // Re-read: a capture may have been added while the requests were in flight.
-  const latest = loadHistory();
+  const latest = loadHistory().filter((item) => !(item.lib === cfg.repo && updates.get(item.id) === null));
   for (const item of latest) if (updates.has(item.id) && item.lib === cfg.repo) item.state = updates.get(item.id);
   saveHistory(latest);
   if ([...updates.values()].includes('done')) await loadLib();
